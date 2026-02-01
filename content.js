@@ -1,26 +1,72 @@
-// X Video Downloader Content Script
-
-const API_BASE = "http://localhost:3000/api";
+// Twoad Content Script
 
 // Create download button element
-function createDownloadButton() {
+function createDownloadButton(mediaType = "video") {
   const button = document.createElement("button");
   button.className = "x-video-download-btn";
 
-  // Create toad icon element
-  const toadIcon = document.createElement("img");
-  toadIcon.src = chrome.runtime.getURL("icon48.png");
-  toadIcon.className = "toad-icon";
-  toadIcon.style.width = "20px";
-  toadIcon.style.height = "20px";
+  // Create toad icon element (use text emoji as fallback if chrome API unavailable)
+  if (
+    typeof chrome !== "undefined" &&
+    chrome.runtime &&
+    chrome.runtime.getURL
+  ) {
+    try {
+      const toadIcon = document.createElement("img");
+      toadIcon.src = chrome.runtime.getURL("icon48.png");
+      toadIcon.className = "toad-icon";
+      toadIcon.style.width = "20px";
+      toadIcon.style.height = "20px";
+      toadIcon.onerror = function () {
+        // If image fails to load, replace with emoji
+        this.style.display = "none";
+        const emoji = document.createElement("span");
+        emoji.textContent = "🐸";
+        emoji.style.fontSize = "16px";
+        button.insertBefore(emoji, button.firstChild);
+      };
+      button.appendChild(toadIcon);
+    } catch (e) {
+      // Fallback to emoji
+      const emoji = document.createElement("span");
+      emoji.textContent = "🐸";
+      emoji.style.fontSize = "16px";
+      button.appendChild(emoji);
+    }
+  } else {
+    // Fallback to emoji if chrome API not available
+    const emoji = document.createElement("span");
+    emoji.textContent = "🐸";
+    emoji.style.fontSize = "16px";
+    button.appendChild(emoji);
+  }
 
   const text = document.createElement("span");
   text.textContent = "Download";
 
-  button.appendChild(toadIcon);
   button.appendChild(text);
-  button.title = "Download this video with Twoad";
+  button.title = `Download this ${mediaType} with Twoad`;
+  button.dataset.mediaType = mediaType;
   return button;
+}
+
+// Add to history
+async function addToHistory(filename, type, url) {
+  const history = await chrome.storage.local.get({ downloadHistory: [] });
+  const newEntry = {
+    filename,
+    type,
+    url,
+    timestamp: Date.now(),
+  };
+
+  history.downloadHistory.unshift(newEntry);
+  // Keep only last 50 downloads
+  if (history.downloadHistory.length > 50) {
+    history.downloadHistory = history.downloadHistory.slice(0, 50);
+  }
+
+  await chrome.storage.local.set({ downloadHistory: history.downloadHistory });
 }
 
 // Extract tweet URL from the current context
@@ -45,15 +91,21 @@ function getTweetUrl(videoElement) {
   return null;
 }
 
-// Handle download button click
-async function handleDownload(tweetUrl, button) {
+// Handle video download
+async function handleVideoDownload(tweetUrl, button) {
   button.disabled = true;
   const textSpan = button.querySelector("span");
   const originalText = textSpan.textContent;
   textSpan.textContent = "Loading...";
 
   try {
-    // Call FixTweet API directly (public, no auth needed)
+    // Get user settings
+    const settings = await chrome.storage.sync.get({
+      filenamePrefix: "twoad",
+      videoQuality: "highest",
+    });
+
+    // Call FixTweet API directly
     const fixTweetUrl = tweetUrl
       .replace("twitter.com", "api.fxtwitter.com")
       .replace("x.com", "api.fxtwitter.com");
@@ -75,12 +127,11 @@ async function handleDownload(tweetUrl, button) {
       throw new Error("No video URLs found");
     }
 
-    // Get the highest quality variant
     const firstVideo = videos[0];
     const variants = firstVideo.variants || [];
 
     // Filter for MP4 and sort by bitrate
-    const mp4Variants = variants
+    let mp4Variants = variants
       .filter((v) => v.content_type === "video/mp4")
       .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
 
@@ -88,11 +139,19 @@ async function handleDownload(tweetUrl, button) {
       throw new Error("No MP4 video found");
     }
 
-    const bestVideo = mp4Variants[0];
+    // Select quality based on user preference
+    let selectedVideo;
+    if (settings.videoQuality === "lowest") {
+      selectedVideo = mp4Variants[mp4Variants.length - 1];
+    } else if (settings.videoQuality === "medium") {
+      selectedVideo = mp4Variants[Math.floor(mp4Variants.length / 2)];
+    } else {
+      selectedVideo = mp4Variants[0]; // highest
+    }
 
-    // Fetch the video as a blob to force download
+    // Fetch the video as a blob
     textSpan.textContent = "Downloading...";
-    const videoResponse = await fetch(bestVideo.url);
+    const videoResponse = await fetch(selectedVideo.url);
 
     if (!videoResponse.ok) {
       throw new Error("Failed to download video");
@@ -101,30 +160,23 @@ async function handleDownload(tweetUrl, button) {
     const blob = await videoResponse.blob();
     const blobUrl = URL.createObjectURL(blob);
 
-    // Get filename settings from storage
-    const settings = await chrome.storage.sync.get({ filenamePrefix: "twoad" });
     const prefix = settings.filenamePrefix || "twoad";
-    const filename = `${prefix}_${Date.now()}.mp4`;
+    const filename = `${prefix}_video_${Date.now()}.mp4`;
 
-    // Use Chrome Downloads API to bypass browser download restrictions
-    chrome.downloads.download(
-      {
-        url: blobUrl,
-        filename: filename,
-        saveAs: false,
-      },
-      (downloadId) => {
-        // Clean up blob URL after download starts
-        setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+    // Use anchor tag for download (works in content scripts)
+    const a = document.createElement("a");
+    a.href = blobUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
 
-        if (chrome.runtime.lastError) {
-          console.error("Download error:", chrome.runtime.lastError);
-          throw new Error(chrome.runtime.lastError.message);
-        }
-      },
-    );
+    // Clean up blob URL after download
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
 
-    // Show success
+    // Add to history
+    addToHistory(filename, "video", tweetUrl);
+
     textSpan.textContent = "✓ Downloaded";
     setTimeout(() => {
       textSpan.textContent = originalText;
@@ -142,7 +194,6 @@ async function handleDownload(tweetUrl, button) {
 
 // Add download button to video player
 function addDownloadButton(videoContainer) {
-  // Check if button already exists
   if (videoContainer.querySelector(".x-video-download-btn")) {
     return;
   }
@@ -153,15 +204,14 @@ function addDownloadButton(videoContainer) {
   const tweetUrl = getTweetUrl(videoContainer);
   if (!tweetUrl) return;
 
-  const button = createDownloadButton();
+  const button = createDownloadButton("video");
 
   button.addEventListener("click", (e) => {
     e.preventDefault();
     e.stopPropagation();
-    handleDownload(tweetUrl, button);
+    handleVideoDownload(tweetUrl, button);
   });
 
-  // Find the video controls area or create our own container
   const playerContainer = videoContainer.querySelector(
     '[data-testid="videoPlayer"]',
   );
@@ -174,7 +224,7 @@ function addDownloadButton(videoContainer) {
 }
 
 // Observer to watch for new videos
-function observeVideos() {
+function observeMedia() {
   const observer = new MutationObserver((mutations) => {
     // Look for video players
     const videoContainers = document.querySelectorAll(
@@ -190,7 +240,7 @@ function observeVideos() {
     subtree: true,
   });
 
-  // Initial check for existing videos
+  // Initial check
   setTimeout(() => {
     const videoContainers = document.querySelectorAll(
       '[data-testid="videoPlayer"]',
@@ -203,7 +253,7 @@ function observeVideos() {
 
 // Initialize
 if (document.readyState === "loading") {
-  document.addEventListener("DOMContentLoaded", observeVideos);
+  document.addEventListener("DOMContentLoaded", observeMedia);
 } else {
-  observeVideos();
+  observeMedia();
 }
