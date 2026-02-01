@@ -1,0 +1,23 @@
+# Development files
+.DS_Store
+Thumbs.db
+*.log
+*.swp
+*~
+
+# Temporary files
+*.tmp
+*.temp
+
+# IDE
+.vscode/
+.idea/
+*.sublime-*
+
+# Archives
+*.zip
+*.crx
+*.pem
+
+# OS
+desktop.ini
